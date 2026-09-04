@@ -92,6 +92,20 @@ Wj%{Ld0%Xd0ssI0{{R30RRC20|NsC0|NsC...
   extracted: out/notes.txt  (2.1 KB)
 
 [PZIP] 1 file(s) extracted to /home/user/out
+
+# Pack a whole folder
+python pzip.py pack my_project/
+
+# Mix files and folders
+python pzip.py pack main.py tests/ config.json
+
+# Unpack restores the full tree
+python pzip.py unpack -o ./restored
+# → restored/my_project/src/main.py
+# → restored/my_project/README.md
+# → etc.
+
+
 Compression Ratios
 Input type	Approx. encoded size vs. original
 Source code / JSON	~45–55%

@@ -201,6 +201,62 @@ def archive_info(pzip_str: str) -> str:
     return '\n'.join(rows)
 
 
+def collect_files(path: Path, base: Path = None) -> List[Tuple[str, bytes]]:
+    """
+    Recursively collect all files under a directory.
+    Filenames are stored as relative paths (e.g. 'src/main.py')
+    so the directory structure is preserved on unpack.
+    """
+
+    if base is None:
+        base = path.parent  # store paths relative to the folder's parent
+
+    file_list = []
+    for entry in sorted(path.rglob('*')):  # sorted for deterministic order
+        if entry.is_file():
+            rel_name = entry.relative_to(base).as_posix()  # forward slashes always
+            file_list.append((rel_name, entry.read_bytes()))
+
+    return file_list
+
+def cmd_pack(args):
+    file_list: List[Tuple[str, bytes]] = []
+
+    for path in (args.files or []):
+        if path == '-':
+            file_list.append(('stdin', sys.stdin.buffer.read()))
+        else:
+            p = Path(path)
+            if not p.exists():
+                sys.exit(f'Error: path not found: {path}')
+            if p.is_dir():
+                collected = collect_files(p)
+                if not collected:
+                    sys.exit(f'Error: directory is empty: {path}')
+                file_list.extend(collected)
+            else:
+                file_list.append((p.name, p.read_bytes()))
+
+    if args.text:
+        file_list.append(('text.txt', args.text.encode('utf-8')))
+
+    if not file_list:
+        sys.exit('Error: no input. Specify files/folders, use - for stdin, or --text "..."')
+
+    result     = pack_files(file_list)
+    total_orig = sum(len(d) for _, d in file_list)
+    total_enc  = len(result)
+
+    print(result)
+
+    print(
+        f'\n[PZIP] {len(file_list)} file(s) packed\n'
+        f'       original : {_size_str(total_orig)} ({total_orig:,} bytes)\n'
+        f'       encoded  : {_size_str(total_enc)} ({total_enc:,} chars)\n'
+        f'       ratio    : {total_enc / max(total_orig, 1):.1%} of original',
+        file=sys.stderr,
+    )
+
 # ── CLI helpers ───────────────────────────────────────────────────────────────
 
 def _size_str(n: int) -> str:

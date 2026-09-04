@@ -200,6 +200,7 @@ def archive_info(pzip_str: str) -> str:
     rows += [sep, f'  {"TOTAL":<{col}} {total:>10,} B', '']
     return '\n'.join(rows)
 
+# ── CLI helpers ───────────────────────────────────────────────────────────────
 
 def collect_files(path: Path, base: Path = None) -> List[Tuple[str, bytes]]:
     """
@@ -257,7 +258,6 @@ def cmd_pack(args):
         file=sys.stderr,
     )
 
-# ── CLI helpers ───────────────────────────────────────────────────────────────
 
 def _size_str(n: int) -> str:
     for unit in ('B', 'KB', 'MB', 'GB'):
@@ -265,40 +265,6 @@ def _size_str(n: int) -> str:
             return f'{n:.1f} {unit}' if unit != 'B' else f'{n} B'
         n /= 1024
     return f'{n:.1f} TB'
-
-
-def cmd_pack(args):
-    file_list: List[Tuple[str, bytes]] = []
-
-    for path in (args.files or []):
-        if path == '-':
-            file_list.append(('stdin', sys.stdin.buffer.read()))
-        else:
-            p = Path(path)
-            if not p.exists():
-                sys.exit(f'Error: file not found: {path}')
-            file_list.append((p.name, p.read_bytes()))
-
-    if args.text:
-        file_list.append(('text.txt', args.text.encode('utf-8')))
-
-    if not file_list:
-        sys.exit('Error: no input. Specify files, use - for stdin, or --text "..."')
-
-    result     = pack_files(file_list)
-    total_orig = sum(len(d) for _, d in file_list)
-    total_enc  = len(result)
-
-    print(result)
-
-    # Stats go to stderr so stdout stays pipe-clean
-    print(
-        f'\n[PZIP] {len(file_list)} file(s) packed\n'
-        f'       original : {_size_str(total_orig)} ({total_orig:,} bytes)\n'
-        f'       encoded  : {_size_str(total_enc)} ({total_enc:,} chars)\n'
-        f'       ratio    : {total_enc / max(total_orig, 1):.1%} of original',
-        file=sys.stderr,
-    )
 
 
 def cmd_unpack(args):

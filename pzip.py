@@ -25,32 +25,44 @@ BINARY PAYLOAD (before base85 encoding)
   ------  ----  -----
   0       4     Magic bytes: b'PZIP'
   4       1     Version (uint8)
-  5       4     Number of files (uint32 BE)
-  -- repeated per file --
+  5       1     Compression codec (0=zlib, 1=bz2, 2=lzma)
+  6       M     Compressed archive data
+
+  The archive data starts with the number of files (uint32 BE), followed by:
   +0      4     Original size (uint32 BE)
   +4      4     CRC-32 of original data (uint32 BE)
   +8      2     Filename length in bytes (uint16 BE)
   +10     N     Filename (UTF-8)
-  +10+N   4     Compressed size (uint32 BE)
-  +14+N   M     zlib-compressed data (level 9)
+  +10+N   M     Original data
 """
 
-import zlib
 import base64
+import bz2
+import lzma
 import struct
 import sys
 import argparse
 import textwrap
+import zlib
 from pathlib import Path
 from typing import List, Tuple
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 MAGIC        = b'PZIP'
-VERSION      = 1
+VERSION      = 2
 LINE_WIDTH   = 76                          # chars per line (PEM uses 64, we use 76)
 BEGIN_MARKER = '--- BEGIN PZIP ARCHIVE ---'
 END_MARKER   = '--- END PZIP ARCHIVE ---'
+CODECS = {
+    0: ('zlib', lambda data: zlib.compress(data, level=9), zlib.decompress),
+    1: ('bz2', lambda data: bz2.compress(data, compresslevel=9), bz2.decompress),
+    2: (
+        'lzma',
+        lambda data: lzma.compress(data, preset=9 | lzma.PRESET_EXTREME),
+        lzma.decompress,
+    ),
+}
 
 
 # ── Core: pack ────────────────────────────────────────────────────────────────
@@ -61,19 +73,22 @@ def pack_files(files: List[Tuple[str, bytes]]) -> str:
 
     Returns a printable ASCII block ready to copy/paste anywhere.
     """
-    parts = [MAGIC, struct.pack('>BI', VERSION, len(files))]
+    parts = [struct.pack('>I', len(files))]
 
     for name, data in files:
         name_b     = name.encode('utf-8')
         crc        = zlib.crc32(data) & 0xFFFFFFFF
-        compressed = zlib.compress(data, level=9)
 
         parts.append(struct.pack('>IIH', len(data), crc, len(name_b)))
         parts.append(name_b)
-        parts.append(struct.pack('>I', len(compressed)))
-        parts.append(compressed)
+        parts.append(data)
 
-    payload = b''.join(parts)
+    archive = b''.join(parts)
+    codec_id, compressed = min(
+        ((codec_id, codec[1](archive)) for codec_id, codec in CODECS.items()),
+        key=lambda item: len(item[1]),
+    )
+    payload = MAGIC + struct.pack('>BB', VERSION, codec_id) + compressed
     encoded = base64.b85encode(payload).decode('ascii')
 
     # Wrap at LINE_WIDTH for readable terminal output
@@ -123,17 +138,38 @@ def unpack_string(pzip_str: str) -> List[Tuple[str, bytes]]:
         raise ValueError(f'Base85 decode failed: {e}') from e
 
     # Validate magic + version
-    if len(payload) < 9:
+    if len(payload) < 5:
         raise ValueError('Payload too short — truncated data?')
     if payload[:4] != MAGIC:
         raise ValueError(f'Bad magic bytes: {payload[:4]!r} (expected {MAGIC!r})')
 
-    version, num_files = struct.unpack('>BI', payload[4:9])
+    version = payload[4]
+    if version == 1:
+        if len(payload) < 9:
+            raise ValueError('Payload too short — truncated data?')
+        num_files = struct.unpack('>I', payload[5:9])[0]
+        return _unpack_v1_entries(payload, 9, num_files)
     if version != VERSION:
-        raise ValueError(f'Unsupported PZIP version: {version} (this tool supports v{VERSION})')
+        raise ValueError(f'Unsupported PZIP version: {version} (this tool supports v1 and v{VERSION})')
+    if len(payload) < 6:
+        raise ValueError('Payload too short — truncated data?')
 
-    # Parse each file entry
-    pos   = 9
+    codec = CODECS.get(payload[5])
+    if codec is None:
+        raise ValueError(f'Unsupported compression codec: {payload[5]}')
+    try:
+        archive = codec[2](payload[6:])
+    except (OSError, EOFError, lzma.LZMAError, zlib.error) as e:
+        raise ValueError(f'{codec[0]} decompress failed: {e}') from e
+    if len(archive) < 4:
+        raise ValueError('Archive data too short — truncated data?')
+
+    num_files = struct.unpack('>I', archive[:4])[0]
+    return _unpack_v2_entries(archive, 4, num_files)
+
+
+def _unpack_v1_entries(payload: bytes, pos: int, num_files: int) -> List[Tuple[str, bytes]]:
+    """Parse entries from a version 1 archive."""
     files = []
 
     for idx in range(num_files):
@@ -143,11 +179,15 @@ def unpack_string(pzip_str: str) -> List[Tuple[str, bytes]]:
         orig_size, crc, name_len = struct.unpack('>IIH', payload[pos:pos + 10])
         pos += 10
 
+        if pos + name_len + 4 > len(payload):
+            raise ValueError(f'Truncated filename or data header at file #{idx + 1}')
         name  = payload[pos:pos + name_len].decode('utf-8')
         pos  += name_len
 
         comp_size = struct.unpack('>I', payload[pos:pos + 4])[0]
         pos += 4
+        if pos + comp_size > len(payload):
+            raise ValueError(f'Truncated compressed data at file #{idx + 1}')
 
         try:
             data = zlib.decompress(payload[pos:pos + comp_size])
@@ -160,6 +200,36 @@ def unpack_string(pzip_str: str) -> List[Tuple[str, bytes]]:
             raise ValueError(
                 f'[{name}] Size mismatch: expected {orig_size:,} B, got {len(data):,} B'
             )
+        actual_crc = zlib.crc32(data) & 0xFFFFFFFF
+        if actual_crc != crc:
+            raise ValueError(
+                f'[{name}] CRC-32 mismatch (expected {crc:#010x}, got {actual_crc:#010x})'
+                ' — data was corrupted during copy/paste'
+            )
+
+        files.append((name, data))
+
+    return files
+
+
+def _unpack_v2_entries(archive: bytes, pos: int, num_files: int) -> List[Tuple[str, bytes]]:
+    """Parse entries from a version 2 archive."""
+    files = []
+
+    for idx in range(num_files):
+        if pos + 10 > len(archive):
+            raise ValueError(f'Truncated header at file #{idx + 1}')
+
+        orig_size, crc, name_len = struct.unpack('>IIH', archive[pos:pos + 10])
+        pos += 10
+        if pos + name_len + orig_size > len(archive):
+            raise ValueError(f'Truncated filename or data at file #{idx + 1}')
+
+        name = archive[pos:pos + name_len].decode('utf-8')
+        pos += name_len
+        data = archive[pos:pos + orig_size]
+        pos += orig_size
+
         actual_crc = zlib.crc32(data) & 0xFFFFFFFF
         if actual_crc != crc:
             raise ValueError(

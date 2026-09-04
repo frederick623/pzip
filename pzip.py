@@ -111,7 +111,12 @@ def unpack_string(pzip_str: str) -> List[Tuple[str, bytes]]:
         )
 
     # Decode base85 payload
-    encoded = ''.join(lines[start + 1 : end])
+    encoded = ''.join(
+        line.strip()                        # ← kills \r, leading/trailing spaces
+        for line in lines[start + 1 : end]
+        if line.strip()                     # ← skip blank lines entirely
+    )
+
     try:
         payload = base64.b85decode(encoded)
     except Exception as e:
@@ -282,6 +287,7 @@ def cmd_unpack(args):
 
     for name, data in files:
         dest = out_dir / name
+        dest.parent.mkdir(parents=True, exist_ok=True)  # ← create subdirs as needed
         dest.write_bytes(data)
         print(f'  extracted: {dest}  ({_size_str(len(data))})')
 

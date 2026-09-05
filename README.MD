@@ -12,7 +12,7 @@ ASCII block that decompresses back to the original, byte-for-byte.
 ## How It Works
 | Layer       | Tool          | Detail                                      |
 |-------------|---------------|---------------------------------------------|
-| Compression | `zlib` lvl 9  | DEFLATE — best ratio, zero dependencies     |
+| Compression | LZMA, Bzip2, or DEFLATE | Selects the smallest level-9 stdlib result |
 | Encoding    | Base85        | 25% more efficient than Base64              |
 | Framing     | PEM-style     | Clear begin/end markers, easy to parse      |
 | Integrity   | CRC-32        | Per-file checksum catches paste corruption  |
@@ -29,7 +29,7 @@ Wj%{Ld0%Xd0ssI0{{R30RRC20|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC
 ## Requirements
 
 - Python 3.6+
-- No third-party packages — uses `zlib`, `base64`, `struct`, and `argparse` from stdlib
+- No third-party packages — uses `lzma`, `bz2`, `zlib`, `base64`, `struct`, and `argparse` from stdlib
 
 ---
 
@@ -121,16 +121,25 @@ before Base85 encoding is:
 Offset  Size  Field
 ------  ----  -----
 0       4     Magic bytes: b'PZIP'
-4       1     Version (uint8)
-5       4     Number of files (uint32 BE)
+4       1     Version (uint8, currently 2)
+5       1     Compression codec (0=zlib, 1=bz2, 2=lzma)
+6       M     Compressed archive data
 
--- repeated per file --
+The archive data begins with the number of files (uint32 BE), then repeats:
+
+Offset  Size  Field
+------  ----  -----
 +0      4     Original size (uint32 BE)
 +4      4     CRC-32 of original data (uint32 BE)
 +8      2     Filename length in bytes (uint16 BE)
 +10     N     Filename (UTF-8)
-+10+N   4     Compressed size (uint32 BE)
-+14+N   M     zlib-compressed data (level 9)
++10+N   M     Original data
+
+PZIP chooses the smallest compressed archive from LZMA (preset 9 extreme),
+Bzip2 (level 9), and DEFLATE (level 9). Compressing the complete archive also
+captures repetition across files. The resulting payload is Base85-encoded, so
+every payload character remains printable ASCII. Version 1 archives remain
+readable.
 Python API
 PZIP can also be used as a library:
 
